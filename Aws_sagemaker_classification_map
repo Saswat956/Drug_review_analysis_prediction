@@ -1,0 +1,169 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.datasets import dump_svmlight_file
+import os
+import sagemaker
+from sagemaker import get_execution_role
+from sagemaker.amazon.amazon_estimator import get_image_uri
+from sagemaker import SKLearn
+
+# Set up SageMaker session and role
+sagemaker_session = sagemaker.Session()
+role = get_execution_role()
+
+# Specify your S3 bucket and prefix
+bucket = "your-s3-bucket"  # replace with your S3 bucket name
+prefix = "your-prefix"  # replace with your desired prefix
+
+# Load data from S3
+s3_input_train = f"s3://{bucket}/{prefix}/drugsComTrain_raw.tsv"
+df = pd.read_csv(s3_input_train, sep='\t')
+
+# Rest of your existing code...
+
+# Preprocessing and Feature Engineering
+
+# Train-test split
+X_feat = df['review_clean']
+y = df['condition']
+X_train, X_test, y_train, y_test = train_test_split(X_feat, y, stratify=y, test_size=0.2, random_state=0)
+
+# Text vectorization
+tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_df=0.8)
+tfidf_train = tfidf_vectorizer.fit_transform(X_train)
+tfidf_test = tfidf_vectorizer.transform(X_test)
+
+# Vectorize X_train
+tfidf_vectorized_train = tfidf_vectorizer.transform(X_train)
+
+# Concatenate vectorized X_train with y_train
+concatenated_train_data = pd.concat([pd.Series(y_train.values, name='label'), pd.DataFrame(tfidf_vectorized_train.toarray())], axis=1)
+
+# Create LibSVM format file
+libsvm_path = 'train_data.libsvm'
+dump_svmlight_file(concatenated_train_data.iloc[:, 1:], concatenated_train_data['label'], libsvm_path)
+
+# Specify output path
+output_path = f"s3://{bucket}/{prefix}/output"
+
+# Upload LibSVM file to S3
+train_data_s3_path = f"s3://{bucket}/{prefix}/train_data"
+s3_train_data = sagemaker.s3.S3Uploader.upload(
+    local_path=libsvm_path,
+    desired_s3_uri=train_data_s3_path,
+    session=sagemaker_session
+)
+
+# Train the model using XGBoost
+container = get_image_uri(sagemaker_session.boto_region_name, 'xgboost')
+xgb_estimator = sagemaker.estimator.Estimator(container,
+                                              role,
+                                              train_instance_count=1,
+                                              train_instance_type='ml.m4.xlarge',
+                                              output_path=output_path,
+                                              sagemaker_session=sagemaker_session)
+
+# Set hyperparameters
+xgb_estimator.set_hyperparameters(
+    objective='multi:softmax',  # For multiclass classification
+    num_class=len(y_train.unique()),  # Number of unique classes
+    num_round=100
+)
+
+# Specify data channels for training
+train_input = sagemaker.inputs.TrainingInput(s3_train_data, content_type='libsvm')
+
+# Train the model
+xgb_estimator.fit({'train': train_input})
+
+# Model Deployment
+
+# Deploy the model
+xgb_predictor = xgb_estimator.deploy(
+    endpoint_name='xgb-endpoint',
+    initial_instance_count=1,
+    instance_type='ml.m4.xlarge'
+)
+
+# Inference with Deployed Model
+
+# Example inference
+test_review = "This is a test review."
+test_review_clean = review_to_words(test_review)
+tfidf_vectorized = tfidf_vectorizer.transform([test_review_clean])
+
+# Prediction using the deployed endpoint
+result = xgb_predictor.predict(tfidf_vectorized.todense())
+
+# Cleanup
+xgb_predictor.delete_endpoint()
+
+
+
+
+--------------------------------------------------------------------------
+
+# Specify your S3 bucket and prefix for test data
+test_bucket = "your-s3-bucket"  # replace with your S3 bucket name
+test_prefix = "your-test-prefix"  # replace with your desired prefix for test data
+
+# Load test data from S3
+s3_input_test = f"s3://{test_bucket}/{test_prefix}/drugsComTest_raw.tsv"
+df_test = pd.read_csv(s3_input_test, sep='\t')
+
+# Rest of your existing code...
+
+# Preprocessing and Feature Engineering for Test Data
+
+# Assuming you already have a tfidf_vectorizer object from training data
+tfidf_test = tfidf_vectorizer.transform(df_test['review_clean'])
+
+# Vectorize X_test
+tfidf_vectorized_test = tfidf_vectorizer.transform(df_test['review_clean'])
+
+# Concatenate vectorized X_test with y_test
+concatenated_test_data = pd.concat([pd.Series(df_test['condition'].values, name='label'), pd.DataFrame(tfidf_vectorized_test.toarray())], axis=1)
+
+# Create LibSVM format file for test data
+libsvm_path_test = 'test_data.libsvm'
+dump_svmlight_file(concatenated_test_data.iloc[:, 1:], concatenated_test_data['label'], libsvm_path_test)
+
+# Upload LibSVM file to S3 for test data
+test_data_s3_path = f"s3://{test_bucket}/{test_prefix}/test_data"
+s3_test_data = sagemaker.s3.S3Uploader.upload(
+    local_path=libsvm_path_test,
+    desired_s3_uri=test_data_s3_path,
+    session=sagemaker_session
+)
+
+# Specify output path for test data
+output_path_test = f"s3://{test_bucket}/{test_prefix}/output"
+
+# Specify data channels for validation (using test data)
+validation_input = sagemaker.inputs.TrainingInput(s3_test_data, content_type='libsvm')
+
+# Train the model using XGBoost with validation on test data
+xgb_estimator.fit({'train': train_input, 'validation': validation_input})
+
+# Model Deployment (unchanged)
+
+# Deploy the model
+xgb_predictor = xgb_estimator.deploy(
+    endpoint_name='xgb-endpoint',
+    initial_instance_count=1,
+    instance_type='ml.m4.xlarge'
+)
+
+# Inference with Deployed Model (unchanged)
+
+# Example inference
+test_review = "This is a test review."
+test_review_clean = review_to_words(test_review)
+tfidf_vectorized = tfidf_vectorizer.transform([test_review_clean])
+
+# Prediction using the deployed endpoint
+result = xgb_predictor.predict(tfidf_vectorized.todense())
+
+# Cleanup (unchanged)
