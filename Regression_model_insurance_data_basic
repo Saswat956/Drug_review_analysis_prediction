@@ -1,0 +1,54 @@
+import sagemaker
+from sagemaker import get_execution_role
+from sagemaker.session import Session
+from sagemaker.amazon.amazon_estimator import get_image_uri
+from sagemaker.tuner import IntegerParameter, ContinuousParameter, HyperparameterTuner
+from sagemaker.inputs import TrainingInput
+
+# Define IAM role
+role = get_execution_role()
+
+# Define SageMaker session
+sagemaker_session = sagemaker.Session()
+
+# S3 bucket and prefix
+bucket = 'your-s3-bucket-name'
+prefix = 'your-s3-prefix'
+
+# Upload data to S3
+train_data_location = sagemaker_session.upload_data(path='path-to-train-csv-file', bucket=bucket, key_prefix=prefix+'/train')
+test_data_location = sagemaker_session.upload_data(path='path-to-test-csv-file', bucket=bucket, key_prefix=prefix+'/test')
+
+# SageMaker container image for Linear Regression
+container = get_image_uri(sagemaker_session.boto_region_name, 'linear-learner')
+
+# Set up Linear Learner Estimator
+linear = sagemaker.estimator.Estimator(container,
+                                       role,
+                                       instance_count=1,
+                                       instance_type='ml.m4.xlarge',
+                                       output_path='s3://{}/{}/output'.format(bucket, prefix))
+
+# Set up hyperparameter tuning
+hyperparameter_ranges = {
+    'mini_batch_size': IntegerParameter(100, 1000),
+    'feature_dim': IntegerParameter(1, 100),
+    'predictor_type': CategoricalParameter(['regressor'])
+}
+
+objective_metric_name = 'test:msd'
+objective_type = 'Minimize'
+
+tuner = HyperparameterTuner(estimator=linear,
+                            objective_metric_name=objective_metric_name,
+                            hyperparameter_ranges=hyperparameter_ranges,
+                            objective_type=objective_type,
+                            max_jobs=20,
+                            max_parallel_jobs=3)
+
+# Set up data channels
+train_input = TrainingInput(train_data_location, content_type='text/csv')
+test_input = TrainingInput(test_data_location, content_type='text/csv')
+
+# Start hyperparameter tuning job
+tuner.fit({'train': train_input, 'test': test_input})
