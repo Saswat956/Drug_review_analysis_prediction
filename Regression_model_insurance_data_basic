@@ -52,3 +52,21 @@ test_input = TrainingInput(test_data_location, content_type='text/csv')
 
 # Start hyperparameter tuning job
 tuner.fit({'train': train_input, 'test': test_input})
+
+# Deploy the best model
+predictor = tuner.deploy(initial_instance_count=1, instance_type='ml.m4.xlarge')
+
+# Prepare input data for prediction
+# You need to have a proper input format based on your model requirements
+# Assuming `X_test` is a DataFrame containing your test features
+payload = X_test.to_csv(index=False, header=False)
+
+# Make predictions
+response = predictor.predict(payload)
+
+# Process the prediction response
+predictions = [float(pred) for pred in response.split(',')]
+# Use predictions as needed
+
+# Delete the endpoint when done
+predictor.delete_endpoint()
